@@ -1,0 +1,103 @@
+name: CI
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  lint-and-test:
+    name: Test on ${{ matrix.os-name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            os-name: Linux (x64)
+          - os: windows-latest
+            os-name: Windows
+          - os: ubuntu-24.04-arm
+            os-name: Raspberry Pi (ARM64)
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0 # Crucial: fetches all history so changes can be compared accurately
+
+    - name: Get Changed Files
+      id: changed-files
+      uses: tj-actions/changed-files@v45
+      with:
+        files: |
+          **/*.py
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11' 
+
+    # --- LINTING ---
+    - name: Install Linting Tools
+      if: matrix.os == 'ubuntu-latest' && steps.changed-files.outputs.any_changed == 'true'
+      run: |
+        python -m pip install --upgrade pip
+        pip install flake8
+
+    - name: Lint with flake8
+      if: matrix.os == 'ubuntu-latest' && steps.changed-files.outputs.any_changed == 'true'
+      run: |
+        # Use the list of space-separated changed files exposed by the action
+        flake8 ${{ steps.changed-files.outputs.all_changed_files }} --count --select=E9,F63,F7,F82 --show-source --statistics
+        flake8 ${{ steps.changed-files.outputs.all_changed_files }} --count --exit-zero --max-complexity=10 --max-line-length=127 --statistics
+
+    # --- LINUX & RASPBERRY PI ENVIRONMENT SETUP ---
+    - name: Install Tkinter & Xvfb (Linux/Pi)
+      if: runner.os == 'Linux' && steps.changed-files.outputs.any_changed == 'true'
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y xvfb python3-tk
+
+    # --- WINDOWS ENVIRONMENT SETUP ---
+    - name: Verify Tkinter (Windows)
+      if: runner.os == 'Windows' && steps.changed-files.outputs.any_changed == 'true'
+      run: python -c "import tkinter"
+
+    # --- RUN SMOKE TESTS (Linux & Raspberry Pi) ---
+    - name: Run Smoke Test (Linux & Raspberry Pi)
+      if: runner.os == 'Linux' && steps.changed-files.outputs.any_changed == 'true'
+      run: |
+        i=99
+        # Iterating over the space-separated list of modified/added Python files
+        for file in ${{ steps.changed-files.outputs.all_changed_files }}; do
+          echo "Testing modified file: $file on display :$i..."
+          xvfb-run -a --server-num=$i --server-args="-screen 0 1024x768x24" timeout 2 python "$file" || [[ $? -eq 124 ]]
+          i=$((i + 1))
+        done
+
+    # --- RUN SMOKE TESTS (Windows) ---
+    - name: Run Smoke Test (Windows)
+      if: runner.os == 'Windows' && steps.changed-files.outputs.any_changed == 'true'
+      shell: powershell
+      run: |
+        # Converts the space-separated list into a PowerShell array
+        $files = "${{ steps.changed-files.outputs.all_changed_files }}" -split ' '
+        
+        foreach ($file in $files) {
+          if (-not (Test-Path $file)) { continue } # Skip if file was deleted
+          Write-Host "Testing modified file: $file..."
+          
+          $proc = Start-Process python -ArgumentList "`"$file`"" -PassThru
+          Start-Sleep -Seconds 2
+          if (-not $proc.HasExited) {
+              $proc | Stop-Process -Force
+              Write-Host "Successfully initialized and running!"
+          } else {
+              if ($proc.ExitCode -ne 0) {
+                  Write-Error "Script crashed on startup with exit code $($proc.ExitCode)"
+                  exit 1
+              }
+          }
+        }
